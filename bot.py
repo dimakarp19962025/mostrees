@@ -4,6 +4,9 @@ Created on Thu Jul 10 16:08:07 2025
 
 @author: da.karpov1
 """
+
+# start stats guardian addtree - commands
+# Добавить функционал для Администратора приложения подтверждать или не подтверждать кандидатов в Хранители
 import os
 import sqlite3
 import json
@@ -346,7 +349,8 @@ def save_tree(user_id, tree_data):
         cursor = conn.cursor()
         
         # Определение района по координатам (упрощённо)
-        district = what_district(lat, long)
+        district = get_moscow_district(lat=tree_data.get('lat'), long=tree_data.get('long'))
+        
         if district is None:
             return False
         
@@ -504,10 +508,10 @@ def handle_guardian_contacts(message):
     bot.send_message(
         message.chat.id,
         f"✅ Регистрация завершена!\n\n"
-        f"Вы стали Хранителем района: {user_states[user_id]['subdistrict']}\n"
+        f"Принята заявка на то, чтобы стать Хранителем района: {user_states[user_id]['subdistrict']}\n"
         f"Ваше ФИО: {user_states[user_id]['fullname']}\n"
         f"Ваши контакты: {message.text}\n\n"
-        "Ожидайте звонка от координатора в ближайшее время!"
+        "Наши Хранители скоро свяжутся с Вами!"
     )
     
     # Очищаем состояние
@@ -537,6 +541,7 @@ def handle_tree_photo(message):
     
     # Сохраняем file_id самой качественной версии фото
     photo = message.photo[-1]
+    breakpoint()
     file_id = photo.file_id
     
     # Добавляем фото в данные дерева
@@ -642,7 +647,7 @@ def handle_tree_comments(message):
     del user_states[user_id]
 
 # ===== WEBAPP И КАРТА =====
-@bot.message_handler(commands=['/start'])
+@bot.message_handler(commands=['start'])
 def send_welcome(message):
     """Обработка команды /start"""
     user_id = str(message.from_user.id)
@@ -673,7 +678,7 @@ def send_welcome(message):
     )
 
 # ===== СТАТИСТИКА =====
-@bot.message_handler(commands=['/stats'])
+@bot.message_handler(commands=['stats'])
 def show_stats(message):
     """Показать статистику пользователя"""
     user_id = str(message.from_user.id)
@@ -796,3 +801,5 @@ def handle_moderation_decision(call):
 if __name__ == '__main__':
     print("Бот запущен...")
     bot.infinity_polling()
+
+# start stats guardian addtree - commands
