@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime
 from collections import defaultdict
 import telebot
+import yadisk
 from telebot import types
 from telebot.types import WebAppInfo
 
@@ -19,10 +20,11 @@ TELEGRAM_BOT_TOKEN = '7618578466:AAFgJSo-i2ivp99CzYmMrXrUgiz2XdePXhg'
 YADISK_TOKEN = os.environ.get('YADISK_TOKEN')
 YADISK_TOKEN = 'y0__xDi3dehqveAAhjK7Dggg9ee4hNhR445wsdmacsXIuSLAxczwKiDzw'
 # Инициализация бота
-bot = telebot.TeleBot(os.environ.get('TELEGRAM_BOT_TOKEN'))
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+y = yadisk.YaDisk(YADISK_TOKEN) 
 
 # Настройка базы данных
-DB_PATH = 'data/trees.db'
+DB_PATH = 'trees.db'
 LOCAL_PHOTOS='Фото'
 if not os.path.exists(LOCAL_PHOTOS):
     os.mkdir(LOCAL_PHOTOS)
@@ -240,7 +242,7 @@ from shapely.geometry import Point
 
 # Загрузка данных (предварительно скачайте файл районов)
 # Пример файла: 'mos_districts.geojson' из https://gis-lab.info/qa/data-mos.html
-districts_gdf = gpd.read_file("Downloads/moscow_districts.geojson")
+districts_gdf = gpd.read_file("moscow_districts.geojson")
 
 def get_moscow_district(lat: float, lon: float) -> str:
     """Определяет район Москвы по координатам.
