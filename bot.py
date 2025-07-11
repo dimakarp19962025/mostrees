@@ -549,7 +549,7 @@ def handle_tree_photo(message):
     # Генерируем уникальное имя файла
     file_name = f"tree_{message.message_id}_{message.from_user.id}.jpg"
     image_data = requests.get(file_url).content
-    file_path = os.path.join('uploads', file_name)
+    file_path = os.path.join('Фото', file_name)
     with open(file_path, 'wb') as f:
         f.write(image_data)
     upload_image(file_path)
