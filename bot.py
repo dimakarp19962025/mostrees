@@ -8,6 +8,7 @@ Created on Thu Jul 10 16:08:07 2025
 # start stats guardian addtree - commands
 # Добавить функционал для Администратора приложения подтверждать или не подтверждать кандидатов в Хранители
 import os
+import requests
 import sqlite3
 import json
 import uuid
@@ -541,9 +542,17 @@ def handle_tree_photo(message):
     
     # Сохраняем file_id самой качественной версии фото
     photo = message.photo[-1]
-    breakpoint()
+
     file_id = photo.file_id
-    
+    file_info = bot.get_file(file_id)
+    file_url = f"https://api.telegram.org/file/bot{bot.token}/{file_info.file_path}"
+    # Генерируем уникальное имя файла
+    file_name = f"tree_{message.message_id}_{message.from_user.id}.jpg"
+    image_data = requests.get(file_url).content
+    file_path = os.path.join('uploads', file_name)
+    with open(file_path, 'wb') as f:
+        f.write(image_data)
+    upload_image(file_path)
     # Добавляем фото в данные дерева
     if 'tree_data' not in user_states[user_id]:
         user_states[user_id]['tree_data'] = {}
@@ -722,11 +731,11 @@ def show_moderation_menu(call):
         WHERE vr.status = 'pending' AND t.district IN ({})
         '''.format(','.join(['?']*len(districts))), districts)
         
-        requests = cursor.fetchall()
+        ver_requests = cursor.fetchall()
     
-    if requests:
+    if ver_requests:
         # Отправляем первый запрос на модерацию
-        request = requests[0]
+        request = ver_requests[0]
         photos = json.loads(request[3])
         
         # Создаем медиа-группу с фотографиями
@@ -748,7 +757,7 @@ def show_moderation_menu(call):
         )
         
         # Сохраняем остальные запросы в состоянии
-        user_states[user_id]['pending_requests'] = requests[1:]
+        user_states[user_id]['pending_requests'] = ver_requests[1:]
     else:
         bot.send_message(call.message.chat.id, "Нет запросов на модерацию в ваших районах.")
 
