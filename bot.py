@@ -27,6 +27,17 @@ YADISK_TOKEN = 'y0__xDi3dehqveAAhjK7Dggg9ee4hNhR445wsdmacsXIuSLAxczwKiDzw'
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 y = yadisk.YaDisk(YADISK_TOKEN) 
 
+# Константы ролей
+ROLES = {
+    'user': 0,
+    'guardian_pending': 1,
+    'guardian': 2,
+    'superguardian': 3,
+    'admin': 4
+}
+
+MAX_DISTRICTS_PER_GUARDIAN = 5  # Максимальное количество районов
+
 # Настройка базы данных
 DB_PATH = 'trees.db'
 LOCAL_PHOTOS='Фото'
@@ -552,17 +563,25 @@ def handle_tree_photo(message):
     file_path = os.path.join('Фото', file_name)
     with open(file_path, 'wb') as f:
         f.write(image_data)
+    remote_path = f"/Фото/{filename}"
     upload_image(file_path)
+    try:
+        y.upload(local_path, remote_path)
+        yandex_url = f"https://disk.yandex.ru/client/disk{remote_path}"
+    except Exception as e:
+        print(f"Ошибка загрузки на Яндекс.Диск: {e}")
+        yandex_url = None
+    
+        
     # Добавляем фото в данные дерева
     if 'tree_data' not in user_states[user_id]:
         user_states[user_id]['tree_data'] = {}
-    
-    if 'photos' not in user_states[user_id]['tree_data']:
-        user_states[user_id]['tree_data']['photos'] = []
-    
-    user_states[user_id]['tree_data']['photos'].append(file_id)
+    user_states[user_id]['tree_data']['photos'] = [{
+        'file_id': file_id,
+        'local_path': local_path,
+        'yandex_url': yandex_url
+    }
     user_states[user_id]['state'] = "tree_location"
-    photo.save(LOCAL_PHOTOS+f'/{file_id}.jpg')
     # Предлагаем кнопку для отправки локации
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("Отправить локацию", request_location=True))
