@@ -54,15 +54,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id TEXT UNIQUE NOT NULL,
-            role TEXT DEFAULT 'user',
+            role INTEGER DEFAULT 0,  -- 0=user, 1=guardian_pending, 2=guardian, 3=superguardian, 4=admin
             districts TEXT,
             fullname TEXT,
             contacts TEXT,
-            consent BOOLEAN DEFAULT 0,
+            approved_by TEXT,  -- Кто одобрил хранителя
             stats TEXT DEFAULT '{"added":0,"approved":0,"rejected":0,"duplicates":0}'
         )
         ''')
-        
+                
         # Таблица деревьев
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS trees (
