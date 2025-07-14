@@ -99,6 +99,23 @@ def init_db():
 # Инициализация БД при запуске
 init_db()
 
+
+def is_admin(user_id):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT role FROM users WHERE telegram_id = ?', (user_id,))
+        result = cursor.fetchone()
+        return result and result[0] == ROLES['admin']
+
+def is_superguardian(user_id):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT role FROM users WHERE telegram_id = ?', (user_id,))
+        result = cursor.fetchone()
+        return result and result[0] >= ROLES['superguardian']
+
+
+
 # Списки округов и районов Москвы
 MOSCOW_DISTRICTS = {
     "ЦАО": [
@@ -492,42 +509,68 @@ def handle_guardian_fullname(message):
         "Пример: myemail@example.com, +79161234567"
     )
 
-@bot.message_handler(func=lambda message: 
+bot.message_handler(func=lambda message: 
                     user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_contacts')
 def handle_guardian_contacts(message):
-    """Обработка контактных данных"""
     user_id = str(message.from_user.id)
     
-    # Сохраняем данные в базу
+    # Сохраняем как ожидающего подтверждения
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        
-        # Сохраняем пользователя как хранителя
         cursor.execute('''
-        INSERT OR REPLACE INTO users (telegram_id, role, districts, fullname, contacts, consent)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO users (
+            telegram_id, role, districts, fullname, contacts
+        ) VALUES (?, ?, ?, ?, ?)
         ''', (
             user_id,
-            "guardian",
+            ROLES['guardian_pending'],
             json.dumps([user_states[user_id]["subdistrict"]]),
             user_states[user_id]["fullname"],
-            message.text,
-            1  # Согласие на обработку данных
+            message.text
         ))
         conn.commit()
     
-    # Отправляем подтверждение
+    # Уведомляем администраторов
+    notify_admins(user_id, user_states[user_id]["subdistrict"]
+                  user_states[user_id]["fullname"] message.text)
+    
     bot.send_message(
         message.chat.id,
-        f"✅ Регистрация завершена!\n\n"
-        f"Принята заявка на то, чтобы стать Хранителем района: {user_states[user_id]['subdistrict']}\n"
-        f"Ваше ФИО: {user_states[user_id]['fullname']}\n"
-        f"Ваши контакты: {message.text}\n\n"
-        "Наши Хранители скоро свяжутся с Вами!"
+        "✅ Ваша заявка подана на рассмотрение! "
+        "Администратор свяжется с вами после проверки."
     )
     
     # Очищаем состояние
     del user_states[user_id]
+
+
+def notify_admins(new_user_id, district, fullname, contact_raw_data):
+    """Уведомляем администраторов о новой заявке"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT telegram_id FROM users WHERE role >= ?', (ROLES['admin'],))
+        admins = cursor.fetchall()
+        
+        for (admin_id,) in admins:
+            try:
+                markup = types.InlineKeyboardMarkup()
+                markup.add(
+                    types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_guardian:{new_user_id}"),
+                    types.InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_guardian:{new_user_id}")
+                )
+                
+                bot.send_message(
+                    admin_id,
+                    f"Новая заявка на хранителя района {district}!\n"
+                    f"Пользователь ID: {new_user_id}\n"
+                    f"ФИО: {fullname}\n"
+                    f"Контактные данные {contact_raw_data}\n"
+                    "Пожалуйста, рассмотрите заявку:",
+                    reply_markup=markup
+                )
+            except Exception as e:
+                print(f"Error notifying admin {admin_id}: {e}")
+
 
 # ===== ДОБАВЛЕНИЕ ДЕРЕВА ЧЕРЕЗ ДИАЛОГ =====
 @bot.message_handler(commands=['addtree'])
@@ -677,27 +720,27 @@ def handle_tree_comments(message):
 # ===== WEBAPP И КАРТА =====
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    """Обработка команды /start"""
     user_id = str(message.from_user.id)
     
-    # Проверяем, зарегистрирован ли пользователь
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT role FROM users WHERE telegram_id = ?', (user_id,))
         user = cursor.fetchone()
     
-    role = user[0] if user else "user"
+    role = user[0] if user else ROLES['user']
     
-    # Кнопка для открытия карты
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton(
         "Открыть карту деревьев", 
         web_app=WebAppInfo(url="https://your-domain.com/webapp")
     ))
     
-    # Дополнительные команды для хранителей
-    if role == "guardian":
+    # Дополнительные возможности для хранителей и администраторов
+    if role >= ROLES['guardian']:
         markup.add(types.InlineKeyboardButton("Модерация запросов", callback_data="moderation"))
+    
+    if role >= ROLES['admin']:
+        markup.add(types.InlineKeyboardButton("Панель администратора", callback_data="admin_panel"))
     
     bot.send_message(
         message.chat.id,
@@ -780,6 +823,126 @@ def show_moderation_menu(call):
     else:
         bot.send_message(call.message.chat.id, "Нет запросов на модерацию в ваших районах.")
 
+@bot.message_handler(commands=['my_districts'])
+def manage_districts(message):
+    user_id = str(message.from_user.id)
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT districts FROM users WHERE telegram_id = ?', (user_id,))
+        result = cursor.fetchone()
+        
+        if not result or not result[0]:
+            bot.reply_to(message, "У вас нет назначенных районов")
+            return
+        
+        districts = json.loads(result[0])
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        
+        # Кнопки для удаления районов
+        for district in districts:
+            markup.add(types.KeyboardButton(f"❌ Удалить {district}"))
+        
+        # Кнопка добавления нового района (если не достигнут лимит)
+        if len(districts) < MAX_DISTRICTS_PER_GUARDIAN:
+            markup.add(types.KeyboardButton("➕ Добавить район"))
+        
+        markup.add(types.KeyboardButton("✅ Завершить"))
+        
+        user_states[user_id] = {
+            "state": "managing_districts",
+            "current_districts": districts
+        }
+        
+        bot.send_message(
+            message.chat.id,
+            "🏙️ Управление вашими районами:\n" + "\n".join([f"- {d}" for d in districts]),
+            reply_markup=markup
+        )
+
+@bot.message_handler(func=lambda message: 
+                    user_states.get(str(message.from_user.id), {}).get('state') == 'managing_districts')
+def handle_district_management(message):
+    user_id = str(message.from_user.id)
+    text = message.text
+    
+    if text == "➕ Добавить район":
+        user_states[user_id]["state"] = "adding_district"
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        markup.add(*[types.KeyboardButton(district) for district in MOSCOW_DISTRICTS.keys()])
+        bot.send_message(
+            message.chat.id,
+            "Выберите административный округ:",
+            reply_markup=markup
+        )
+    
+    elif text == "✅ Завершить":
+        # Сохраняем изменения
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'UPDATE users SET districts = ? WHERE telegram_id = ?',
+                (json.dumps(user_states[user_id]["current_districts"]), user_id)
+            )
+            conn.commit()
+        
+        del user_states[user_id]
+        bot.send_message(
+            message.chat.id,
+            "✅ Ваши районы успешно обновлены!",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+    
+    elif text.startswith("❌ Удалить "):
+        district_to_remove = text[11:]
+        if district_to_remove in user_states[user_id]["current_districts"]:
+            user_states[user_id]["current_districts"].remove(district_to_remove)
+            
+            # Обновляем сообщение
+            response = "🏙️ Управление вашими районами:\n" + "\n".join(
+                [f"- {d}" for d in user_states[user_id]["current_districts"]] or ["Нет районов"])
+            
+            markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            for district in user_states[user_id]["current_districts"]:
+                markup.add(types.KeyboardButton(f"❌ Удалить {district}"))
+            
+            if len(user_states[user_id]["current_districts"]) < MAX_DISTRICTS_PER_GUARDIAN:
+                markup.add(types.KeyboardButton("➕ Добавить район"))
+            
+            markup.add(types.KeyboardButton("✅ Завершить"))
+            
+            bot.send_message(
+                message.chat.id,
+                f"✅ Район '{district_to_remove}' удален!\n\n{response}",
+                reply_markup=markup
+            )
+        else:
+            bot.send_message(message.chat.id, "❌ Этот район не найден в вашем списке")
+
+@bot.message_handler(commands=['init_admin'])
+def init_admin(message):
+    user_id = str(message.from_user.id)
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users WHERE role = ?', (ROLES['admin'],))
+        admin_count = cursor.fetchone()[0]
+        
+        if admin_count > 0:
+            bot.reply_to(message, "❌ Администратор уже существует")
+            return
+        
+        # Назначаем первого администратора
+        cursor.execute('''
+        INSERT INTO users (telegram_id, role)
+        VALUES (?, ?)
+        ''', (user_id, ROLES['admin']))
+        conn.commit()
+        
+        bot.reply_to(message, "✅ Вы назначены первым администратором системы!")
+
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('approve_', 'reject_', 'duplicate_')))
 def handle_moderation_decision(call):
     """Обработка решения хранителя"""
@@ -824,6 +987,157 @@ def handle_moderation_decision(call):
     else:
         bot.send_message(call.message.chat.id, "Модерация завершена!")
         del user_states[user_id]['pending_requests']
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('approve_guardian:', 'reject_guardian:')))
+def handle_guardian_decision(call):
+    action, target_id = call.data.split(':')
+    admin_id = str(call.from_user.id)
+    
+    if not is_admin(admin_id):
+        bot.answer_callback_query(call.id, "⛔ У вас нет прав администратора!")
+        return
+    
+    new_role = ROLES['guardian'] if action == "approve_guardian" else ROLES['user']
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        UPDATE users 
+        SET role = ?, approved_by = ?
+        WHERE telegram_id = ?
+        ''', (new_role, admin_id, target_id))
+        conn.commit()
+        
+        # Уведомляем пользователя
+        try:
+            if action == "approve_guardian":
+                bot.send_message(
+                    target_id, 
+                    "🎉 Поздравляем! Ваша заявка на хранителя одобрена. "
+                    "Теперь вы можете проверять деревья в вашем районе."
+                )
+            else:
+                bot.send_message(
+                    target_id, 
+                    "❌ Ваша заявка на хранителя отклонена. "
+                    "Вы можете подать заявку повторно через некоторое время."
+                )
+        except Exception as e:
+            print(f"Error notifying user: {e}")
+        
+        bot.answer_callback_query(call.id, "Решение принято!")
+        bot.edit_message_text(
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            text=f"{call.message.text}\n\nРешение: {'Одобрено' if action == 'approve_guardian' else 'Отклонено'}",
+            reply_markup=None
+        )
+
+@bot.message_handler(commands=['admin_panel'])
+def admin_panel(message):
+    user_id = str(message.from_user.id)
+    
+    if not is_admin(user_id):
+        bot.reply_to(message, "⛔ Только для администраторов")
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("Управление хранителями", callback_data="admin_manage_guardians"),
+        types.InlineKeyboardButton("Управление суперхранителями", callback_data="admin_manage_supers"),
+        types.InlineKeyboardButton("Просмотр статистики", callback_data="admin_view_stats")
+    )
+    
+    bot.send_message(
+        message.chat.id,
+        "⚙️ Панель администратора:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
+def handle_admin_actions(call):
+    user_id = str(call.from_user.id)
+    action = call.data.split('_')[1]
+    
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "⛔ Доступ запрещен")
+        return
+    
+    if action == "manage_guardians":
+        # Показать список хранителей с возможностью управления
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT telegram_id, fullname, districts FROM users WHERE role = ?', (ROLES['guardian'],))
+            guardians = cursor.fetchall()
+            
+            response = "🧑‍🌾 Список хранителей:\n\n"
+            for g in guardians:
+                response += f"ID: {g[0]}\nИмя: {g[1]}\nРайоны: {g[2]}\n\n"
+                response += f"Действия: "
+                response += f"[Повысить](/promote_to_super_{g[0]}) "
+                response += f"[Снять](/revoke_guardian_{g[0]})\n\n"
+            
+            bot.send_message(call.message.chat.id, response, parse_mode="Markdown")
+    
+    # Другие действия...
+
+@bot.message_handler(commands=['promote_to_super_'])
+def promote_to_super(message):
+    user_id = str(message.from_user.id)
+    target_id = message.text.split('_')[-1]
+    
+    if not is_admin(user_id):
+        return
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        UPDATE users 
+        SET role = ?, approved_by = ?
+        WHERE telegram_id = ?
+        ''', (ROLES['superguardian'], user_id, target_id))
+        conn.commit()
+        
+        bot.reply_to(message, f"✅ Пользователь {target_id} теперь суперхранитель!")
+        try:
+            bot.send_message(
+                target_id,
+                "🎉 Вы назначены суперхранителем! Теперь вы можете одобрять заявки других хранителей."
+            )
+        except:
+            pass
+
+@bot.message_handler(commands=['revoke_super_'])
+def revoke_super(message):
+    user_id = str(message.from_user.id)
+    target_id = message.text.split('_')[-1]
+    
+    if not is_admin(user_id):
+        return
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        UPDATE users 
+        SET role = ?
+        WHERE telegram_id = ? AND role = ?
+        ''', (ROLES['guardian'], target_id, ROLES['superguardian']))
+        conn.commit()
+        
+        if cursor.rowcount > 0:
+            bot.reply_to(message, f"✅ Роль суперхранителя для {target_id} отозвана!")
+            try:
+                bot.send_message(
+                    target_id,
+                    "ℹ️ Ваша роль суперхранителя была отозвана администратором."
+                )
+            except:
+                pass
+        else:
+            bot.reply_to(message, "❌ Пользователь не найден или не является суперхранителем")
+
+
+
 
 # Запуск бота
 if __name__ == '__main__':
