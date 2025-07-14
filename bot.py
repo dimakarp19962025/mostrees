@@ -470,29 +470,43 @@ def handle_guardian_district(message):
             "❌ Такого округа нет в списке. Пожалуйста, выберите округ из предложенных."
         )
 
-
 @bot.message_handler(func=lambda message: 
                     user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_subdistrict')
 def handle_guardian_subdistrict(message):
-    """Обработка выбора района"""
     user_id = str(message.from_user.id)
     subdistrict = message.text
-    district = user_states[user_id].get("district", "")
+    district = user_states[user_id].get("current_district", "")
     
-    # Проверяем, что выбранный район принадлежит выбранному округу
+    # Проверка ограничения
+    current_count = len(user_states[user_id].get("districts", []))
+    if current_count >= MAX_DISTRICTS_PER_GUARDIAN:
+        bot.send_message(
+            user_id,
+            f"❌ Вы не можете добавить более {MAX_DISTRICTS_PER_GUARDIAN} районов. "
+            "Нажмите '✅ Завершить выбор' чтобы продолжить."
+        )
+        show_district_selection(user_id)
+        return
+    
     if district and subdistrict in MOSCOW_DISTRICTS.get(district, []):
-        user_states[user_id]["subdistrict"] = subdistrict
-        user_states[user_id]["state"] = "guardian_fullname"
+        full_district_name = f"{district}, {subdistrict}"
+        
+        if "districts" not in user_states[user_id]:
+            user_states[user_id]["districts"] = []
+            
+        user_states[user_id]["districts"].append(full_district_name)
+        user_states[user_id]["state"] = "guardian_district"
         
         bot.send_message(
-            message.chat.id,
-            "Отлично! Теперь введите ваше ФИО (полностью):",
+            user_id,
+            f"✅ Район '{full_district_name}' добавлен! Выберите следующий округ или нажмите 'Завершить выбор'",
             reply_markup=types.ReplyKeyboardRemove()
         )
+        show_district_selection(user_id)
     else:
         bot.send_message(
-            message.chat.id,
-            f"❌ Район {subdistrict} не принадлежит округу {district}. Пожалуйста, выберите район из списка."
+            user_id,
+            f"❌ Район '{subdistrict}' не принадлежит округу '{district}'. Пожалуйста, выберите район из списка."
         )
 
 @bot.message_handler(func=lambda message: 
