@@ -18,6 +18,8 @@ import telebot
 import yadisk
 from telebot import types
 from telebot.types import WebAppInfo
+import geopandas as gpd
+from shapely.geometry import Point
 
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_BOT_TOKEN = '7618578466:AAFgJSo-i2ivp99CzYmMrXrUgiz2XdePXhg'
@@ -266,11 +268,10 @@ MOSCOW_DISTRICTS = {
     "Троицкий АО":["Троицкий административный округ"],
     "Новомосковский АО": ["Новомосковский административный округ"]
 }
-#   web_app=WebAppInfo(url="https://your-domain.com/webapp")
+web_app=WebAppInfo(url="https://your-domain.com/webapp")
 
 
-import geopandas as gpd
-from shapely.geometry import Point
+
 
 # Загрузка данных (предварительно скачайте файл районов)
 # Пример файла: 'mos_districts.geojson' из https://gis-lab.info/qa/data-mos.html
@@ -470,6 +471,81 @@ def handle_guardian_district(message):
             "❌ Такого округа нет в списке. Пожалуйста, выберите округ из предложенных."
         )
 
+def show_district_selection(user_id):
+    """Показывает клавиатуру для выбора округов и районов с ограничениями"""
+    try:
+        # Проверяем текущее количество выбранных районов
+        current_count = len(user_states[user_id].get("districts", []))
+        
+        # Создаем клавиатуру
+        markup = types.ReplyKeyboardMarkup(
+            resize_keyboard=True, 
+            row_width=2,
+            one_time_keyboard=False
+        )
+        
+        # Добавляем кнопки округов
+        districts_buttons = []
+        for district in MOSCOW_DISTRICTS.keys():
+            # Проверяем, есть ли в округе доступные районы
+            available_subdistricts = [
+                sub for sub in MOSCOW_DISTRICTS[district] 
+                if f"{district}, {sub}" not in user_states[user_id].get("districts", [])
+            ]
+            
+            if available_subdistricts:
+                districts_buttons.append(types.KeyboardButton(district))
+        
+        # Разбиваем на ряды по 2 кнопки
+        for i in range(0, len(districts_buttons), 2):
+            row = districts_buttons[i:i+2]
+            markup.add(*row)
+        
+        # Добавляем кнопки управления
+        if current_count > 0:
+            markup.add(types.KeyboardButton("✅ Завершить выбор"))
+            
+            # Показываем информацию о текущем выборе
+            selected_text = "\n".join(
+                f"• {d}" for d in user_states[user_id]["districts"]
+            )
+            message_text = (
+                f"Вы выбрали {current_count}/{MAX_DISTRICTS_PER_GUARDIAN} районов:\n"
+                f"{selected_text}\n\n"
+                "Выберите следующий округ:"
+            )
+        else:
+            message_text = "Выберите административный округ Москвы:"
+        
+        # Добавляем кнопку отмены
+        markup.add(types.KeyboardButton("❌ Отмена"))
+        
+        # Проверяем ограничение по количеству районов
+        if current_count >= MAX_DISTRICTS_PER_GUARDIAN:
+            bot.send_message(
+                user_id,
+                f"❌ Вы достигли максимума в {MAX_DISTRICTS_PER_GUARDIAN} районов. "
+                "Нажмите '✅ Завершить выбор' чтобы продолжить.",
+                reply_markup=markup
+            )
+        else:
+            bot.send_message(
+                user_id,
+                message_text,
+                reply_markup=markup
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in show_district_selection: {str(e)}")
+        bot.send_message(
+            user_id,
+            "⚠️ Произошла ошибка при загрузке районов. Попробуйте позже.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        # Сбрасываем состояние при ошибке
+        if user_id in user_states:
+            del user_states[user_id]
+
 @bot.message_handler(func=lambda message: 
                     user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_subdistrict')
 def handle_guardian_subdistrict(message):
@@ -545,8 +621,8 @@ def handle_guardian_contacts(message):
         conn.commit()
     
     # Уведомляем администраторов
-    notify_admins(user_id, user_states[user_id]["subdistrict"]
-                  user_states[user_id]["fullname"] message.text)
+    notify_admins(user_id, user_states[user_id]["subdistrict"],
+                  user_states[user_id]["fullname"], message.text)
     
     bot.send_message(
         message.chat.id,
@@ -620,10 +696,10 @@ def handle_tree_photo(message):
     file_path = os.path.join('Фото', file_name)
     with open(file_path, 'wb') as f:
         f.write(image_data)
-    remote_path = f"/Фото/{filename}"
+    remote_path = f"/Фото/{file_name}"
     upload_image(file_path)
     try:
-        y.upload(local_path, remote_path)
+        y.upload(file_path, remote_path)
         yandex_url = f"https://disk.yandex.ru/client/disk{remote_path}"
     except Exception as e:
         print(f"Ошибка загрузки на Яндекс.Диск: {e}")
@@ -633,9 +709,9 @@ def handle_tree_photo(message):
     # Добавляем фото в данные дерева
     if 'tree_data' not in user_states[user_id]:
         user_states[user_id]['tree_data'] = {}
-    user_states[user_id]['tree_data']['photos'] = [{
+    user_states[user_id]['tree_data']['photos'] = {
         'file_id': file_id,
-        'local_path': local_path,
+        'local_path': file_path,
         'yandex_url': yandex_url
     }
     user_states[user_id]['state'] = "tree_location"
