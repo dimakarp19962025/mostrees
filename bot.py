@@ -768,7 +768,7 @@ def handle_guardian_phone(message):
     print('Call handle_guardian_phone')
     print(message)
     user_id = str(message.from_user.id)    
-    user_states[user_id]['fullname'] = message
+    user_states[user_id]['fullname'] = message.text
     bot.send_message(
         message.chat.id,
         "Введите ваш сотовый номер. Начинаться должен с +7."
@@ -783,7 +783,7 @@ def handle_guardian_email(message):
     user_id = str(message.from_user.id)    
     if message.text[:2]!='+7' or len(message.text.replace(' ', ''))!=12:
         bot.send_message(message.chat.id, 'Номер должен начинаться с +7 и состоять из 10 цифр после +7. Иные номера не поддерживаются')
-        user_states[user_id]["state"] = "guardian_phone"
+        user_states[user_id]["state"] = "guardian_email"
     else:
         user_states[user_id]['phone'] = message.text
         bot.send_message(
@@ -811,7 +811,7 @@ def handle_guardian_data(message):
             cursor.execute('''
             INSERT OR REPLACE INTO users (
                 telegram_id, role, districts, fullname, phone, email
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             ''', (
                 user_id,
                 ROLES['guardian_pending'],
