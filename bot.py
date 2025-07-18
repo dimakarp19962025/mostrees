@@ -22,9 +22,7 @@ import geopandas as gpd
 from shapely.geometry import Point
 
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-TELEGRAM_BOT_TOKEN = '7618578466:AAFgJSo-i2ivp99CzYmMrXrUgiz2XdePXhg'
 YADISK_TOKEN = os.environ.get('YADISK_TOKEN')
-YADISK_TOKEN = 'y0__xDi3dehqveAAhjK7Dggg9ee4hNhR445wsdmacsXIuSLAxczwKiDzw'
 # Инициализация бота
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 y = yadisk.YaDisk(YADISK_TOKEN) 
