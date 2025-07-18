@@ -6,6 +6,7 @@ Created on Thu Jul 10 16:08:07 2025
 """
 
 # start stats guardian addtree - commands
+# CHANGE TOKEN BEFOREHAND!
 # Добавить функционал для Администратора приложения подтверждать или не подтверждать кандидатов в Хранители
 import os
 import requests
@@ -22,7 +23,9 @@ import geopandas as gpd
 from shapely.geometry import Point
 
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_BOT_TOKEN = '7618578466:AAFgJSo-i2ivp99CzYmMrXrUgiz2XdePXhg'
 YADISK_TOKEN = os.environ.get('YADISK_TOKEN')
+YADISK_TOKEN = 'y0__xDi3dehqveAAhjWhTkghrfZ7BNOdwab2B-c-cEwy8tTKdNPIiOZAw'
 # Инициализация бота
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 y = yadisk.YaDisk(YADISK_TOKEN) 
@@ -36,7 +39,8 @@ ROLES = {
     'admin': 4
 }
 
-MAX_DISTRICTS_PER_GUARDIAN = 5  # Максимальное количество районов
+MAX_DISTRICTS_PER_GUARDIAN = 1  # Максимальное количество районов
+ADMIN_ID = '169878591'
 
 # Настройка базы данных
 DB_PATH = 'trees.db'
@@ -57,7 +61,8 @@ def init_db():
             role INTEGER DEFAULT 0,  -- 0=user, 1=guardian_pending, 2=guardian, 3=superguardian, 4=admin
             districts TEXT,
             fullname TEXT,
-            contacts TEXT,
+            phone TEXT,
+            email TEXT,
             approved_by TEXT,  -- Кто одобрил хранителя
             stats TEXT DEFAULT '{"added":0,"approved":0,"rejected":0,"duplicates":0}'
         )
@@ -68,8 +73,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS trees (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tree_id TEXT UNIQUE,
-            lat REAL,
-            lng REAL,
+            latitude REAL,
+            longitude REAL,
             status TEXT DEFAULT 'pending', -- pending/approved/rejected/duplicate
             type TEXT, -- alive/dead/attention/special
             photos TEXT, -- JSON array of file_ids
@@ -99,13 +104,77 @@ def init_db():
 # Инициализация БД при запуске
 init_db()
 
+def is_user(user_id):
+    """
+    Возвращает полную информацию о пользователе в виде словаря.
+    Возвращает None, если пользователь не найден.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # Получаем все данные о пользователе
+        cursor.execute('''
+        SELECT id, telegram_id, role, districts, fullname, phone, email, approved_by, stats
+        FROM users 
+        WHERE telegram_id = ?
+        ''', (user_id,))
+        
+        user_data = cursor.fetchone()
+        
+        if user_data:
+            # Преобразуем в словарь с понятными ключами
+            columns = [column[0] for column in cursor.description]
+            user_dict = dict(zip(columns, user_data))
+            
+            # Преобразуем JSON-поля в объекты Python
+            if user_dict.get('districts'):
+                user_dict['districts'] = json.loads(user_dict['districts'])
+            if user_dict.get('stats'):
+                user_dict['stats'] = json.loads(user_dict['stats'])
+                
+            return user_dict
+        return None
+def change_user_data(user_id, fullname=None,email=None,phone=None,districts=[]):
+    """
+    Удаляет персональные данные пользователя из системы (GDPR compliance).
+    Сохраняет только telegram_id и статистику.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        if fullname is not None:
+            cursor.execute('''
+            UPDATE users 
+            SET 
+                fullname = ?,
+            WHERE telegram_id = ?
+            ''', (fullname, user_id))
+        if email is not None:
+            cursor.execute('''
+            UPDATE users 
+            SET 
+                email = ?,
+            WHERE telegram_id = ?
+            ''', (email, user_id))
+        if phone is not None:
+            cursor.execute('''
+            UPDATE users 
+            SET 
+                phone = ?,
+            WHERE telegram_id = ?
+            ''', (phone, user_id))
+                                                
+        conn.commit()
+        return True
 
-def is_admin(user_id):
+def get_districts(user_id):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT role FROM users WHERE telegram_id = ?', (user_id,))
         result = cursor.fetchone()
-        return result and result[0] == ROLES['admin']
+        return result and result[0] >= ROLES['guardian']    
+
+def is_admin(user_id):
+    return user_id == ADMIN_ID # This is me
 
 def is_superguardian(user_id):
     with get_db_connection() as conn:
@@ -114,7 +183,68 @@ def is_superguardian(user_id):
         result = cursor.fetchone()
         return result and result[0] >= ROLES['superguardian']
 
+def is_guardian(user_id):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT role FROM users WHERE telegram_id = ?', (user_id,))
+        result = cursor.fetchone()
+        return result and result[0] >= ROLES['guardian']
 
+def is_guardian_pending(user_id):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT role FROM users WHERE telegram_id = ?', (user_id,))
+        result = cursor.fetchone()
+        return result and result[0] >= ROLES['guardian_pending']
+
+
+def add_new_user_if_not_exists(telegram_id):
+    """
+    Добавляет нового пользователя с указанным telegram_id и ролью 0 (обычный пользователь),
+    если пользователь с таким telegram_id еще не существует в базе.
+    
+    Возвращает:
+        True - если пользователь был добавлен
+        False - если пользователь уже существует
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Проверяем существование пользователя
+        cursor.execute('SELECT COUNT(*) FROM users WHERE telegram_id = ?', (telegram_id,))
+        exists = cursor.fetchone()[0] > 0
+        
+        if not exists:
+            # Добавляем нового пользователя
+            cursor.execute('''
+            INSERT INTO users (
+                telegram_id, 
+                role,
+                districts,
+                fullname,
+                phone,
+                email,
+                approved_by,
+                stats
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                telegram_id,
+                ROLES['user'],  # роль 0 - обычный пользователь
+                None,           # districts
+                None,           # fullname
+                None,           # phone
+                None,           # email
+                None,           # approved_by
+                json.dumps({    # пустая статистика
+                    "added": 0,
+                    "approved": 0,
+                    "rejected": 0,
+                    "duplicates": 0
+                })
+            ))
+            conn.commit()
+            return True
+        return False
 
 # Списки округов и районов Москвы
 MOSCOW_DISTRICTS = {
@@ -264,35 +394,44 @@ MOSCOW_DISTRICTS = {
         "Старое Крюково"
     ],
     "Троицкий АО":["Троицкий административный округ"],
-    "Новомосковский АО": ["Новомосковский административный округ"]
+    "Новомосковский АО": ["Новомосковский административный округ"],
+    "Не Москва":["Не Москва"]
 }
 web_app=WebAppInfo(url="https://your-domain.com/webapp")
 
 
-
+@bot.message_handler(func=lambda message: message.text.lower() == "назад")
+def handle_back_button(message):
+    """Обработка кнопки 'Назад' для возврата в главное меню"""
+    user_id = str(message.from_user.id)
+    
+    # Сбрасываем состояние пользователя
+    if user_id in user_states:
+        del user_states[user_id]
+    send_welcome(message)
 
 # Загрузка данных (предварительно скачайте файл районов)
 # Пример файла: 'mos_districts.geojson' из https://gis-lab.info/qa/data-mos.html
 districts_gdf = gpd.read_file("moscow_districts.geojson")
 
-def get_moscow_district(lat: float, lon: float) -> str:
+def get_moscow_district(latitude: float, longitude: float) -> str:
     """Определяет район Москвы по координатам.
     
     Args:
-        lat (float): Широта в WGS84 (например, 55.751244)
-        lon (float): Долгота в WGS84 (например, 37.618423)
+        latitude (float): Широта в WGS84 (например, 55.751244)
+        longitude (float): Долгота в WGS84 (например, 37.618423)
     
     Returns:
         str: Название района или None, если точка вне границ.
     """
-    point = Point(lon, lat)
+    point = Point(longitude, latitude)
     
     # Проверка принадлежности к полигонам районов
     for idx, row in districts_gdf.iterrows():
         if row['geometry'].contains(point):
             return row['district']  # Название района из столбца 'name'
     
-    return None
+    return "Не Москва"
 
 
 def upload_image(local_path: str, remote_folder: str = "/Фото"):
@@ -377,18 +516,18 @@ def save_tree(user_id, tree_data):
         cursor = conn.cursor()
         
         # Определение района по координатам (упрощённо)
-        district = get_moscow_district(lat=tree_data.get('lat'), long=tree_data.get('long'))
+        district = get_moscow_district(latitude=tree_data.get('latitude'), longitude=tree_data.get('longitude'))
         
         if district is None:
             return False
         
         cursor.execute('''
-        INSERT INTO trees (tree_id, lat, lng, type, photos, comments, district, created_by)
+        INSERT INTO trees (tree_id, latitude, longitude, type, photos, comments, district, created_by)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             str(uuid.uuid4()),
-            tree_data.get('lat'),
-            tree_data.get('lng'),
+            tree_data.get('latitude',-1),
+            tree_data.get('longitude', -1),
             tree_data.get('type'),
             json.dumps(tree_data.get('photos', [])),
             tree_data.get('comments'),
@@ -397,29 +536,48 @@ def save_tree(user_id, tree_data):
         ))
         
         conn.commit()
+        print('Добавлено дерево!!!')
+        print(user_id)
+        r0=conn.cursor().execute('SELECT stats FROM users WHERE telegram_id = ?', (user_id,)).fetchone()
         update_user_stats(user_id, 'added')
+        r1=conn.cursor().execute('SELECT stats FROM users WHERE telegram_id = ?', (user_id,)).fetchone()
+        print('before')
+        print(r0)
+        print('after')
+        print(r1)
+        assert r0!=r1
         return True
 
 # ===== РЕГИСТРАЦИЯ ХРАНИТЕЛЯ =====
 @bot.message_handler(commands=['guardian'])
 def start_guardian(message):
+    print('Call start_guardian')
+    print(message)
     """Начало процесса регистрации Хранителя"""
     user_id = str(message.from_user.id)
-    user_states[user_id] = {"state": "guardian_consent"}
-    
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("Да"), types.KeyboardButton("Нет"))
-    
-    bot.send_message(
-        message.chat.id,
-        "Вы готовы стать Хранителем района? Если да, то мы попросим ваши персональные и контактные данные, "
-        "в соответствии со 152-ФЗ. Вы согласны?",
-        reply_markup=markup
-    )
+    if is_guardian_pending(user_id):
+        bot.send_message(message.chat.id, 'Ваша заявка рассматривается. Ожидайте ответа')
+        bot.send_message(message.chat.id, f'Данные заявки {is_user(user_id)}')
+    elif is_guardian(user_id):
+        bot.send_message(message.chat.id, 'Вы уже Хранитель района')
+    else:
+        user_states[user_id] = {"state": "guardian_consent"}
+        
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("Да"), types.KeyboardButton("Нет"))
+        
+        bot.send_message(
+            message.chat.id,
+            "Вы готовы стать Хранителем района? Если да, то мы попросим ваши персональные и контактные данные, "
+            "в соответствии со 152-ФЗ. Вы согласны?",
+            reply_markup=markup
+        )
 
 @bot.message_handler(func=lambda message: 
                     user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_consent')
 def handle_guardian_consent(message):
+    print('Call handle_guardian_consent')
+    print(message)
     """Обработка согласия на обработку данных"""
     user_id = str(message.from_user.id)
     
@@ -429,7 +587,7 @@ def handle_guardian_consent(message):
         # Создаем клавиатуру с округами
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
         markup.add(*[types.KeyboardButton(district) for district in MOSCOW_DISTRICTS.keys()])
-        
+
         bot.send_message(
             message.chat.id,
             "Выберите административный округ Москвы:",
@@ -446,30 +604,37 @@ def handle_guardian_consent(message):
 @bot.message_handler(func=lambda message: 
                     user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_district')
 def handle_guardian_district(message):
+    print('Call handle_guardian_district')
+    print(message)
     """Обработка выбора округа"""
     user_id = str(message.from_user.id)
     district = message.text
     
     if district in MOSCOW_DISTRICTS:
-        user_states[user_id]["district"] = district
+        user_states[user_id]["current_district"] = district
         user_states[user_id]["state"] = "guardian_subdistrict"
         
         # Создаем клавиатуру с районами выбранного округа
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
         markup.add(*[types.KeyboardButton(sub) for sub in MOSCOW_DISTRICTS[district]])
-        
+
         bot.send_message(
             message.chat.id,
             f"Теперь выберите район в округе {district}:",
             reply_markup=markup
         )
+    elif district in ['Назад', '❌ Отмена','✅ Завершить выбор']:
+        send_welcome(message)
     else:
         bot.send_message(
             message.chat.id,
             "❌ Такого округа нет в списке. Пожалуйста, выберите округ из предложенных."
         )
 
+
 def show_district_selection(user_id):
+    print('Call show_district_selection')
+    print(user_id)    
     """Показывает клавиатуру для выбора округов и районов с ограничениями"""
     try:
         # Проверяем текущее количество выбранных районов
@@ -534,7 +699,7 @@ def show_district_selection(user_id):
             )
             
     except Exception as e:
-        logger.error(f"Error in show_district_selection: {str(e)}")
+        print(f"Error in show_district_selection: {str(e)}")
         bot.send_message(
             user_id,
             "⚠️ Произошла ошибка при загрузке районов. Попробуйте позже.",
@@ -547,6 +712,8 @@ def show_district_selection(user_id):
 @bot.message_handler(func=lambda message: 
                     user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_subdistrict')
 def handle_guardian_subdistrict(message):
+    print('Call handle_guardian_subdistrict')
+    print(message)
     user_id = str(message.from_user.id)
     subdistrict = message.text
     district = user_states[user_id].get("current_district", "")
@@ -569,14 +736,14 @@ def handle_guardian_subdistrict(message):
             user_states[user_id]["districts"] = []
             
         user_states[user_id]["districts"].append(full_district_name)
-        user_states[user_id]["state"] = "guardian_district"
+        user_states[user_id]["state"] = "guardian_fullname"
         
         bot.send_message(
             user_id,
-            f"✅ Район '{full_district_name}' добавлен! Выберите следующий округ или нажмите 'Завершить выбор'",
+            f"✅ Район '{full_district_name}' добавлен! ",
             reply_markup=types.ReplyKeyboardRemove()
         )
-        show_district_selection(user_id)
+        handle_guardian_fullname(message)
     else:
         bot.send_message(
             user_id,
@@ -586,57 +753,94 @@ def handle_guardian_subdistrict(message):
 @bot.message_handler(func=lambda message: 
                     user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_fullname')
 def handle_guardian_fullname(message):
-    """Обработка ввода ФИО"""
-    user_id = str(message.from_user.id)
-    user_states[user_id]["fullname"] = message.text
-    user_states[user_id]["state"] = "guardian_contacts"
-    
+    print('Call handle_guardian_fullname')
+    print(message)
     bot.send_message(
         message.chat.id,
-        "Теперь введите ваши контактные данные (email и телефон через запятую):\n"
-        "Пример: myemail@example.com, +79161234567"
+        "Введите вашу фамилию, имя, отчество. Как Вас звать-величать?"
     )
+    user_id = str(message.from_user.id)    
+    user_states[user_id]["state"] = "guardian_phone"
 
-bot.message_handler(func=lambda message: 
-                    user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_contacts')
-def handle_guardian_contacts(message):
-    user_id = str(message.from_user.id)
-    
-    # Сохраняем как ожидающего подтверждения
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-        INSERT OR REPLACE INTO users (
-            telegram_id, role, districts, fullname, contacts
-        ) VALUES (?, ?, ?, ?, ?)
-        ''', (
-            user_id,
-            ROLES['guardian_pending'],
-            json.dumps([user_states[user_id]["subdistrict"]]),
-            user_states[user_id]["fullname"],
-            message.text
-        ))
-        conn.commit()
-    
-    # Уведомляем администраторов
-    notify_admins(user_id, user_states[user_id]["subdistrict"],
-                  user_states[user_id]["fullname"], message.text)
-    
+@bot.message_handler(func=lambda message: 
+                    user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_phone')
+def handle_guardian_phone(message):
+    print('Call handle_guardian_phone')
+    print(message)
+    user_id = str(message.from_user.id)    
+    user_states[user_id]['fullname'] = message
     bot.send_message(
         message.chat.id,
-        "✅ Ваша заявка подана на рассмотрение! "
-        "Администратор свяжется с вами после проверки."
+        "Введите ваш сотовый номер. Начинаться должен с +7."
     )
+    user_states[user_id]["state"] = "guardian_email"
+
+@bot.message_handler(func=lambda message: 
+                    user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_email')
+def handle_guardian_email(message):
+    print('Call handle_guardian_email')
+    print(message)
+    user_id = str(message.from_user.id)    
+    if message.text[:2]!='+7' or len(message.text.replace(' ', ''))!=12:
+        bot.send_message(message.chat.id, 'Номер должен начинаться с +7 и состоять из 10 цифр после +7. Иные номера не поддерживаются')
+        user_states[user_id]["state"] = "guardian_phone"
+    else:
+        user_states[user_id]['phone'] = message.text
+        bot.send_message(
+            message.chat.id,
+            "Введите ваш email."
+        )
+        user_states[user_id]["state"] = "guardian_write_data"
+
+
+@bot.message_handler(func=lambda message: 
+                    user_states.get(str(message.from_user.id), {}).get('state') == 'guardian_write_data')
+def handle_guardian_data(message):
+    print('Call handle_guardian_data')
+    print(message)
+    user_id = str(message.from_user.id)
+
+    if '@' not in message.text:
+        bot.send_message(message.chat.id, 'Email должен содержать @')
+        user_states[user_id]["state"] = "guardian_email"
+    else:
+        user_states[user_id]['email'] = message.text
+        # Сохраняем как ожидающего подтверждения
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+            INSERT OR REPLACE INTO users (
+                telegram_id, role, districts, fullname, phone, email
+            ) VALUES (?, ?, ?, ?, ?)
+            ''', (
+                user_id,
+                ROLES['guardian_pending'],
+                json.dumps(user_states[user_id]["districts"]),
+                user_states[user_id]["fullname"],
+                user_states[user_id]['phone'],
+                user_states[user_id]['email']
+            ))
+            conn.commit()
     
-    # Очищаем состояние
-    del user_states[user_id]
+        # Уведомляем администраторов
+        notify_admins(user_id, user_states[user_id]["districts"],
+                    user_states[user_id]["fullname"], message.text)
+        
+        bot.send_message(
+            message.chat.id,
+            "✅ Ваша заявка подана на рассмотрение! "
+            "Администратор свяжется с вами после проверки."
+        )
+        
+        # Очищаем состояние
+        del user_states[user_id]
 
 
 def notify_admins(new_user_id, district, fullname, contact_raw_data):
     """Уведомляем администраторов о новой заявке"""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute('SELECT telegram_id FROM users WHERE role >= ?', (ROLES['admin'],))
+        cursor.execute('SELECT telegram_id FROM users WHERE role >= ?', (ROLES['superguardian'],))
         admins = cursor.fetchall()
         
         for (admin_id,) in admins:
@@ -661,7 +865,7 @@ def notify_admins(new_user_id, district, fullname, contact_raw_data):
 
 
 # ===== ДОБАВЛЕНИЕ ДЕРЕВА ЧЕРЕЗ ДИАЛОГ =====
-@bot.message_handler(commands=['addtree'])
+@bot.message_handler(commands=['addtree'], func = lambda message: any([x in message.text for x in ['addtree', 'Добавить дерево']]))
 def start_add_tree(message):
     """Начало процесса добавления дерева"""
     user_id = str(message.from_user.id)
@@ -669,6 +873,9 @@ def start_add_tree(message):
         "state": "tree_photo",
         "tree_data": {}
     }
+    
+    # IF user NOT IN base - ADD HIM!
+    add_new_user_if_not_exists(user_id)
     
     bot.send_message(
         message.chat.id,
@@ -694,14 +901,13 @@ def handle_tree_photo(message):
     file_path = os.path.join('Фото', file_name)
     with open(file_path, 'wb') as f:
         f.write(image_data)
-    remote_path = f"/Фото/{file_name}"
-    upload_image(file_path)
-    try:
-        y.upload(file_path, remote_path)
-        yandex_url = f"https://disk.yandex.ru/client/disk{remote_path}"
-    except Exception as e:
-        print(f"Ошибка загрузки на Яндекс.Диск: {e}")
-        yandex_url = None
+    #remote_path = f"/Фото/{file_name}"
+    #try:
+    #    y.upload(file_path, remote_path)
+    #    yandex_url = f"https://disk.yandex.ru/client/disk{remote_path}"
+    #except Exception as e:
+    #    print(f"Ошибка загрузки на Яндекс.Диск: {e}")
+    #    yandex_url = ''
     
         
     # Добавляем фото в данные дерева
@@ -710,16 +916,15 @@ def handle_tree_photo(message):
     user_states[user_id]['tree_data']['photos'] = {
         'file_id': file_id,
         'local_path': file_path,
-        'yandex_url': yandex_url
+        #'yandex_url': yandex_url
     }
     user_states[user_id]['state'] = "tree_location"
     # Предлагаем кнопку для отправки локации
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("Отправить локацию", request_location=True))
-    
+    markup.add(types.KeyboardButton("Отправить свою локацию", request_location=True))    
     bot.send_message(
         message.chat.id,
-        "Отлично! Теперь отправьте местоположение дерева:",
+        "Отлично! Теперь отправьте локацию дерева. Если Вы рядом с ним, отправьте свою локацию. Если нет, прикрепите локацию к сообщению.",
         reply_markup=markup
     )
 
@@ -730,10 +935,10 @@ def handle_tree_location(message):
     """Обработка локации дерева"""
     user_id = str(message.from_user.id)
     location = message.location
-    
+    print(location)
     # Сохраняем координаты
-    user_states[user_id]['tree_data']['lat'] = location.latitude
-    user_states[user_id]['tree_data']['lng'] = location.longitude
+    user_states[user_id]['tree_data']['latitude'] = location.latitude
+    user_states[user_id]['tree_data']['longitude'] = location.longitude
     user_states[user_id]['state'] = "tree_type"
     
     # Предлагаем выбрать тип дерева
@@ -750,6 +955,7 @@ def handle_tree_location(message):
         "Выберите состояние дерева:",
         reply_markup=markup
     )
+
 
 @bot.message_handler(func=lambda message: 
                     user_states.get(str(message.from_user.id), {}).get('state') == 'tree_type')
@@ -799,7 +1005,7 @@ def handle_tree_comments(message):
     else:
         bot.send_message(
             message.chat.id,
-            "❌ Произошла ошибка при сохранении дерева. Попробуйте позже."
+            "Район пока не поддерживается!"
         )
     
     # Очищаем состояние
@@ -818,18 +1024,22 @@ def send_welcome(message):
     role = user[0] if user else ROLES['user']
     
     markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Добавить дерево", callback_data="addtree"))
+
     markup.add(types.InlineKeyboardButton(
         "Открыть карту деревьев", 
         web_app=WebAppInfo(url="https://your-domain.com/webapp")
     ))
-    
     # Дополнительные возможности для хранителей и администраторов
-    if role >= ROLES['guardian']:
+    if  int(role) >= ROLES['guardian']:
         markup.add(types.InlineKeyboardButton("Модерация запросов", callback_data="moderation"))
-    
-    if role >= ROLES['admin']:
+        if int(role) == ROLES['guardian']:
+            markup.add(types.InlineKeyboardButton("Мои районы", callback_data="my_districts"))
+    else:
+        markup.add(types.InlineKeyboardButton("Стать Хранителем", callback_data="guardian"))
+    markup.add(types.InlineKeyboardButton("Моя статистика", callback_data="stats"))
+    if int(role) >= ROLES['admin']:
         markup.add(types.InlineKeyboardButton("Панель администратора", callback_data="admin_panel"))
-    
     bot.send_message(
         message.chat.id,
         f"Привет, {message.from_user.first_name}! Добро пожаловать в систему мониторинга деревьев Москвы.",
@@ -936,7 +1146,8 @@ def manage_districts(message):
             markup.add(types.KeyboardButton("➕ Добавить район"))
         
         markup.add(types.KeyboardButton("✅ Завершить"))
-        
+        markup.add(types.KeyboardButton("Назад"))  # Добавляем кнопку Назад
+
         user_states[user_id] = {
             "state": "managing_districts",
             "current_districts": districts
@@ -998,7 +1209,8 @@ def handle_district_management(message):
                 markup.add(types.KeyboardButton("➕ Добавить район"))
             
             markup.add(types.KeyboardButton("✅ Завершить"))
-            
+            markup.add(types.KeyboardButton("Назад"))  # Добавляем кнопку Назад
+
             bot.send_message(
                 message.chat.id,
                 f"✅ Район '{district_to_remove}' удален!\n\n{response}",
@@ -1010,7 +1222,7 @@ def handle_district_management(message):
 @bot.message_handler(commands=['init_admin'])
 def init_admin(message):
     user_id = str(message.from_user.id)
-    
+    assert user_id == ADMIN_ID
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM users WHERE role = ?', (ROLES['admin'],))
@@ -1102,7 +1314,7 @@ def handle_guardian_decision(call):
                 bot.send_message(
                     target_id, 
                     "🎉 Поздравляем! Ваша заявка на хранителя одобрена. "
-                    "Теперь вы можете проверять деревья в вашем районе."
+                    "Теперь вы можете проверять деревья в выбранных районах."
                 )
             else:
                 bot.send_message(
@@ -1126,6 +1338,7 @@ def admin_panel(message):
     user_id = str(message.from_user.id)
     
     if not is_admin(user_id):
+        print(user_id)
         bot.reply_to(message, "⛔ Только для администраторов")
         return
     
@@ -1167,7 +1380,32 @@ def handle_admin_actions(call):
             
             bot.send_message(call.message.chat.id, response, parse_mode="Markdown")
     
-    # Другие действия...
+@bot.message_handler(commands=['change_fullname'])
+def change_name(message):
+    if not is_admin(str(message.from_user_id)):
+        return
+    tg_id=message.text.split('_')[-2]
+    new_fullname=message.text.split('_')[-1]
+    change_user_data(user_id=int(tg_id),fullname=new_fullname)
+
+@bot.message_handler(commands=['change_email'])
+def change_email(message):
+    if not is_admin(str(message.from_user_id)):
+        return
+    tg_id=message.text.split(' ')[-2]
+    new_email=message.text.split(' ')[-1]
+    change_user_data(user_id=int(tg_id),email=new_email)
+
+@bot.message_handler(commands=['change_phone'])
+def change_phone(message):
+    if not is_admin(str(message.from_user_id)):
+        return
+    tg_id=message.text.split(' ')[-2]
+    new_phone=message.text.split(' ')[-1]
+    change_user_data(user_id=int(tg_id),phone=new_phone)
+  
+  
+
 
 @bot.message_handler(commands=['promote_to_super_'])
 def promote_to_super(message):
@@ -1225,11 +1463,39 @@ def revoke_super(message):
             bot.reply_to(message, "❌ Пользователь не найден или не является суперхранителем")
 
 
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callback(call):
+    user_id = str(call.from_user.id)
+    data = call.data
+    
+    if data == "addtree":
+        start_add_tree(call.message)
+    elif data == "guardian":
+        start_guardian(call.message)
+    elif data == "moderation":
+        show_moderation_menu(call)
+    elif data == "my_districts":
+        manage_districts(call.message)
+    elif data == "stats":
+        show_stats(call.message)
+    elif data == "admin_panel":
+        admin_panel(call.message)
+    elif data.startswith("approve_"):
+        handle_moderation_decision(call)
+    elif data.startswith("reject_"):
+        handle_moderation_decision(call)
+    elif data.startswith("duplicate_"):
+        handle_moderation_decision(call)
+    elif data.startswith("approve_guardian:"):
+        handle_guardian_decision(call)
+    elif data.startswith("reject_guardian:"):
+        handle_guardian_decision(call)
+
 
 
 # Запуск бота
 if __name__ == '__main__':
-    print("Бот запущен...")
+    print("Бот запущен... ПОМЕНЯТЬ ТОКЕН ДО ВЫХОДА БОТА В СВЕТ И ЗАПРИВАТИТЬ И ВСЕ ПРОТЕСТИТЬ")
     bot.infinity_polling()
 
 # start stats guardian addtree - commands
